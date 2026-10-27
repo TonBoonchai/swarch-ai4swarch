@@ -35,10 +35,10 @@ language: Thai
 
 | เกณฑ์ | Run a | Run b |
 |---|---|---|
-| ใช้ตัวเลขจาก scenario หรือไม่ (latency, ช่วงพีก, ข้อจำกัดของ MailFast) | | |
-| ทางเลือกที่พิจารณา (ระบุ) | | |
-| จัดการแต้มสะสมแบบ "ครั้งเดียวเท่านั้น" และ rate limit ของ MailFast หรือไม่ อย่างไร | | |
-| มีสิ่งที่แต่งขึ้นเองหรือไม่ (ตัวเลข เครื่องมือ หรือข้อเท็จจริงที่ไม่มีใน scenario) | | |
+| ใช้ตัวเลขจาก scenario หรือไม่ (latency, ช่วงพีก, ข้อจำกัดของ MailFast) | ไม่ใช้เลย ทุกตัวเลขเขียนว่า "Not evidenced" และย้ายไป Open questions (ปริมาณ order, latency target, SLA/rate limit ของ MailFast) | ใช้ครบ: p95 ≤ 500 ms (เหลือ budget ~200 ms), 200 orders/s, MailFast p95 1.5 s / p99 8 s / fail 0.5 % / 50 emails/s, loyalty ≤ 1 นาที exactly once, ทีมรู้ Go/gRPC/RabbitMQ, self-hosted บน Kubernetes และคำนวณ backlog อีเมล 150 ข้อความ/s ช่วงพีก |
+| ทางเลือกที่พิจารณา (ระบุ) | 1) sync orchestration ใน `checkoutservice` 2) pub/sub ผ่าน broker + transactional outbox 3) in-process async fan-out 4) workflow/saga engine → เลือก 2 แต่**ไม่เลือกตัว broker** (ยกไป ADR ถัดไป) | 1) sync gRPC fan-out 2) goroutine async 3) RabbitMQ events 4) Kafka events → เลือก **RabbitMQ** โดยให้เหตุผลจากทักษะทีมและ constraint open-source self-hosted |
+| จัดการแต้มสะสมแบบ "ครั้งเดียวเท่านั้น" และ rate limit ของ MailFast หรือไม่ อย่างไร | แบบทั่วไป: consumer idempotent ด้วย order id, retry + backoff + circuit breaker + DLQ แต่ไม่รู้ตัวเลข rate limit จึงไม่ได้ออกแบบ throttling จริง และไม่มีเวลา "ภายใน 1 นาที" | ชัดเจน: `loyaltyservice` dedup ด้วย `order_id` (at-least-once + idempotent), queue แยกจากอีเมลเพื่อไม่ติด backlog และ alert เมื่อ queue age ใกล้ 60 s; email consumer จำกัด ≤ 50/s รวมทุก replica + retry + DLQ |
+| มีสิ่งที่แต่งขึ้นเองหรือไม่ (ตัวเลข เครื่องมือ หรือข้อเท็จจริงที่ไม่มีใน scenario) | ไม่มีตัวเลขแต่ง ข้อสันนิษฐานเรื่องระบบเดิมติดป้าย [Inferred] แต่เสนอ transactional outbox โดยไม่รู้ว่า `checkoutservice` ไม่มี DB และยกตัวอย่าง Google Cloud Pub/Sub ซึ่งขัดกับ constraint self-hosted (ที่ไม่รู้) | ไม่มีตัวเลขแต่ง แต่มีข้อเสนอที่ไม่มีใน scenario: quorum queues (ติด [Inferred]), protobuf สำหรับ event schema, publisher confirms; และอ้างว่า Kafka "เกินความจำเป็น" ที่ 200 events/s (ติด [Inferred]) |
 
 ## รับผิดชอบ ADR ฉบับสุดท้ายของตัวเอง
 
@@ -51,6 +51,6 @@ language: Thai
 
 | # | สิ่งที่เปลี่ยนจากร่างของ AI | เหตุผล |
 |---|---|---|
-| 1 | | |
-| 2 | | |
-| 3 | | |
+| 1 | เพิ่ม order DB ให้ `checkoutservice` และใช้ transactional outbox แทนการ publish ตรงแล้ว log เมื่อล้มเหลว | ร่างของ AI ยอมให้ event หายได้เมื่อ publish ไม่สำเร็จ ลูกค้าถูกตัดเงินแต่ไม่ได้อีเมลและแต้ม ซึ่งขัดกับข้อกำหนดว่าต้องได้แต้มแน่นอน และ `checkoutservice` ไม่มี DB (`main.go` struct บรรทัด 66–86) outbox จึงต้องเพิ่ม DB ตั้งแต่รอบนี้ แลกกับ component เพิ่มและ DB อยู่ใน critical path (เพิ่มเป็น consequence และ validation) |
+| 2 | อีเมลช่วง peak: ยอมรับความล่าช้าเป็น baseline **และ** ขอเพิ่ม rate limit กับ MailFast เป็น action item ก่อน 11.11 | 200 orders/s เทียบกับ 50 emails/s ทำให้ backlog โต 150 ข้อความ/s ร่าง AI แค่ตั้งคำถามไว้ การยอมรับความช้าทำให้ระบบยังถูกต้องแม้เจรจาไม่สำเร็จ ส่วนการขอเพิ่ม limit ลดความล่าช้าที่ลูกค้าเห็น |
+| 3 | ตัด fraud scoring ออกจากขอบเขต ADR นี้ ทำ ADR แยก | fraud scoring ที่ต้อง block order เป็นขั้นตอน synchronous ใน critical path ไม่ใช่ consumer ของ `OrderPlaced` ร่าง AI ใส่ไว้ทั้งในรายการ action ที่ bind queue ได้และใน Open questions ซึ่งขัดกันเอง |
